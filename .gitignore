@@ -1,0 +1,5 @@
+launcher.ico
+launch_data.of
+*.o
+*.exe
+!upx.exe
