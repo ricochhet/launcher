@@ -1,5 +1,7 @@
-launcher.ico
-launch_data.of
+*.ico
 *.o
+*.obj
+*.syso
+*.of
 *.exe
 !upx.exe
