@@ -12,14 +12,12 @@
 #include <cstdio>
 #include <cwchar>
 #include <cwctype>
-#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "sha256.hpp"
 
-namespace fs = std::filesystem;
 using std::wstring;
 
 inline wstring launcherName;
@@ -27,6 +25,10 @@ inline wstring launcherName;
 [[noreturn]] inline void failf(const wstring &msg) {
 	MessageBoxW(nullptr, msg.c_str(), launcherName.c_str(), MB_ICONERROR);
 	ExitProcess(1);
+}
+
+inline void warnf(const wstring &msg) {
+	MessageBoxW(nullptr, msg.c_str(), launcherName.c_str(), MB_ICONWARNING);
 }
 
 inline wstring trimSpace(const wstring &s) {
@@ -42,6 +44,12 @@ inline wstring trimQuotes(const wstring &s) {
 	if (b == wstring::npos)
 		return L"";
 	return s.substr(b, s.find_last_not_of(L'"') - b + 1);
+}
+
+inline wstring toLower(wstring s) {
+	std::transform(s.begin(), s.end(), s.begin(),
+	               [](wchar_t c) { return (wchar_t)std::towlower(c); });
+	return s;
 }
 
 inline wstring utf8ToWide(const std::string &s) {
@@ -68,11 +76,32 @@ inline wstring winErrorText(DWORD code) {
 	return s;
 }
 
+inline bool isAbsolutePath(const wstring &p) {
+	return (p.size() >= 2 && p[1] == L':') ||
+	       (p.size() >= 2 && p[0] == L'\\' && p[1] == L'\\');
+}
+
+inline size_t lastSep(const wstring &p) { return p.find_last_of(L"\\/"); }
+
+inline wstring fileNameOf(const wstring &p) {
+	size_t i = lastSep(p);
+	return i == wstring::npos ? p : p.substr(i + 1);
+}
+
+inline wstring parentDirOf(const wstring &p) {
+	size_t i = lastSep(p);
+	return i == wstring::npos ? L"" : p.substr(0, i);
+}
+
 inline wstring resolve(const wstring &dir, const wstring &path) {
-	fs::path joined = fs::path(dir) / path;
-	std::error_code ec;
-	fs::path abs = fs::absolute(joined, ec);
-	return (ec ? joined : abs.lexically_normal()).wstring();
+	wstring joined = isAbsolutePath(path) ? path : dir + L"\\" + path;
+	DWORD n = GetFullPathNameW(joined.c_str(), 0, nullptr, nullptr);
+	if (!n)
+		return joined;
+	wstring out(n, L'\0');
+	n = GetFullPathNameW(joined.c_str(), n, out.data(), nullptr);
+	out.resize(n);
+	return out;
 }
 
 struct FileCloser {
@@ -140,9 +169,7 @@ inline void splitCommand(const wstring &raw, wstring &exe, wstring &args) {
 		return;
 	}
 
-	wstring lower = line;
-	std::transform(lower.begin(), lower.end(), lower.begin(),
-	               [](wchar_t c) { return (wchar_t)std::towlower(c); });
+	wstring lower = toLower(line);
 	size_t split = lower.find(L".exe");
 	split = split != wstring::npos
 	            ? split + 4
@@ -152,21 +179,25 @@ inline void splitCommand(const wstring &raw, wstring &exe, wstring &args) {
 	args = trimSpace(line.substr(split));
 }
 
-inline void verifyLine(const wstring &dir, const wstring &line) {
+inline void parseHashLine(const wstring &line, wstring &want, wstring &rel) {
 	size_t i = line.find_first_of(L" \t");
 	if (i == wstring::npos)
 		throw wstring(L"expected \"<sha256> <path>\"");
 
-	wstring want = line.substr(0, i);
-	std::transform(want.begin(), want.end(), want.begin(),
-	               [](wchar_t c) { return (wchar_t)std::towlower(c); });
+	want = toLower(line.substr(0, i));
 	if (want.size() != 64 ||
 	    want.find_first_not_of(L"0123456789abcdef") != wstring::npos)
-		throw wstring(L"invalid sha256 (expected 64 hex chars)");
+		throw wstring(L"unknown directive or invalid sha256 (expected 64 hex "
+		              L"chars)");
 
-	wstring rel = trimQuotes(trimSpace(line.substr(i)));
+	rel = trimQuotes(trimSpace(line.substr(i)));
 	if (rel.empty())
 		throw wstring(L"missing file path");
+}
+
+inline void verifyLine(const wstring &dir, const wstring &line) {
+	wstring want, rel;
+	parseHashLine(line, want, rel);
 
 	wstring path = resolve(dir, rel);
 	wstring got = hashFile(path);

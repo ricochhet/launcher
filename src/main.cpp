@@ -1,4 +1,5 @@
-#include "utils.hpp"
+#include "config.hpp"
+#include "inject.hpp"
 
 static const wchar_t *kConfigName = L"launch_data.of";
 
@@ -8,9 +9,9 @@ int main() {
 	if (!len)
 		failf(L"Could not determine launcher location");
 
-	fs::path selfPath(wstring(selfBuf, len));
-	launcherName = selfPath.filename().wstring();
-	wstring dir = selfPath.parent_path().wstring();
+	wstring selfPath(selfBuf, len);
+	launcherName = fileNameOf(selfPath);
+	wstring dir = parentDirOf(selfPath);
 
 	std::vector<wstring> lines;
 	try {
@@ -21,21 +22,25 @@ int main() {
 	if (lines.empty())
 		failf(wstring(kConfigName) + L" is empty");
 
-	for (size_t i = 1; i < lines.size(); i++) {
-		wstring line = trimSpace(lines[i]);
-		if (line.empty())
-			continue;
+	LaunchConfig cfg;
+	try {
+		cfg = parseConfig(lines);
+	} catch (const wstring &e) {
+		failf(wstring(kConfigName) + L" " + e);
+	}
+
+	for (const ConfigEntry &entry : cfg.hashes) {
 		try {
-			verifyLine(dir, line);
+			verifyLine(dir, entry.value);
 		} catch (const wstring &e) {
-			failf(wstring(kConfigName) + L" line " + std::to_wstring(i + 1) +
-			      L": " + e);
+			failf(wstring(kConfigName) + L" line " +
+			      std::to_wstring(entry.line) + L": " + e);
 		}
 	}
 
 	wstring exe, args;
 	try {
-		splitCommand(lines[0], exe, args);
+		splitCommand(cfg.command.value, exe, args);
 	} catch (const wstring &e) {
 		failf(wstring(kConfigName) + L" line 1: " + e);
 	}
@@ -47,7 +52,7 @@ int main() {
 	wstring cmdline = L"\"" + exe + L"\"";
 	if (!args.empty())
 		cmdline += L" " + args;
-	wstring exeDir = fs::path(exe).parent_path().wstring();
+	wstring exeDir = parentDirOf(exe);
 
 	std::vector<wchar_t> cl(cmdline.begin(), cmdline.end());
 	cl.push_back(L'\0');
@@ -56,10 +61,39 @@ int main() {
 	si.cb = sizeof si;
 	PROCESS_INFORMATION pi = {};
 
-	if (!CreateProcessW(exe.c_str(), cl.data(), nullptr, nullptr, FALSE, 0,
+	bool suspended = !cfg.injects.empty();
+	DWORD flags = suspended ? CREATE_SUSPENDED : 0;
+
+	if (!CreateProcessW(exe.c_str(), cl.data(), nullptr, nullptr, FALSE, flags,
 	                    nullptr, exeDir.c_str(), &si, &pi))
 		failf(L"Failed to launch:\n" + cmdline + L"\n\n" +
 		      winErrorText(GetLastError()));
+
+	for (const ConfigEntry &entry : cfg.injects) {
+		wstring dll = resolve(dir, entry.value);
+		try {
+			injectDll(pi.hProcess, dll);
+		} catch (const wstring &e) {
+			if (cfg.abortOnInjectFailure) {
+				TerminateProcess(pi.hProcess, 1);
+				CloseHandle(pi.hThread);
+				CloseHandle(pi.hProcess);
+				failf(L"Injection failed, aborting launch.\n\n" + e);
+			}
+			warnf(L"Injection failed:\n\n" + e);
+		}
+	}
+
+	if (suspended && ResumeThread(pi.hThread) == (DWORD)-1) {
+		wstring err = winErrorText(GetLastError());
+		TerminateProcess(pi.hProcess, 1);
+		CloseHandle(pi.hThread);
+		CloseHandle(pi.hProcess);
+		failf(L"Failed to resume the process:\n" + err);
+	}
+
+	if (cfg.wait)
+		WaitForSingleObject(pi.hProcess, INFINITE);
 
 	CloseHandle(pi.hThread);
 	CloseHandle(pi.hProcess);
